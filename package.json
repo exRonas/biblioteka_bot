@@ -1,0 +1,25 @@
+{
+  "name": "biblioteka-bot",
+  "version": "1.0.0",
+  "description": "Library bot for Telegram and WhatsApp (Windows Server compatible)",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "dev": "ts-node src/index.ts",
+    "fill-search": "ts-node scripts/fill_search_data.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "fastify": "^4.24.3",
+    "grammy": "^1.19.2",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.9.0",
+    "@types/pg": "^8.10.9",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  }
+}
