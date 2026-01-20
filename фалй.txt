@@ -1,0 +1,42 @@
+-- 1. Расширение (если pg_trgm установлен в системе)
+CREATE EXTENSION pg_trgm;
+
+-- 2. Колонки (совместимо с PostgreSQL 9.3)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='ebook'
+          AND column_name='work_key'
+    ) THEN
+        ALTER TABLE public.ebook ADD COLUMN work_key text;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='ebook'
+          AND column_name='title_norm'
+    ) THEN
+        ALTER TABLE public.ebook ADD COLUMN title_norm text;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='ebook'
+          AND column_name='author_norm'
+    ) THEN
+        ALTER TABLE public.ebook ADD COLUMN author_norm text;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='ebook'
+          AND column_name='search_tsv'
+    ) THEN
+        ALTER TABLE public.ebook ADD COLUMN search_tsv tsvector;
+    END IF;
+END$$;
