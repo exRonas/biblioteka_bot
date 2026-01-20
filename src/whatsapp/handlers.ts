@@ -8,7 +8,11 @@ function formatEdition(e: Edition): string {
     const parts = [];
     if (e.data_edition) parts.push(`📅 Издание: ${e.data_edition}`);
     if (e.language) parts.push(`🌐 Язык: ${e.language}`);
-    // if (e.placement) parts.push(`📍 Расположение: ${e.placement}`);
+    
+    if (e.locations && e.locations.length > 0) {
+        parts.push(`📍 Расположение: ${e.locations.join(', ')}`);
+    }
+
     if (e.index_catalogue) parts.push(`🔖 Шифр: ${e.index_catalogue}`);
     if (e.volume) parts.push(`📚 Том: ${e.volume}`);
     if (e.copy_count) parts.push(`🔢 Экз: ${e.copy_count}`);
@@ -194,8 +198,17 @@ export async function handleWhatsAppMessage(message: any, phoneId: string) {
             // Get edition
             if (state.lastSearch && state.lastSearch.works[num - 1]) {
                 const work = state.lastSearch.works[num - 1];
+                
+                // Get header stats
+                const locationStats = await searchService.getWorkLocationStats(work.work_key);
                 const { items: editions } = await searchService.getEditions(work.work_key);
-                 let msg = `${t.show_editions} *${work.display_title}*:\n\n`;
+                 
+                let msg = `${t.show_editions} *${work.display_title}*:\n`;
+                if (locationStats) {
+                     msg += `🏢 Места хранения: ${locationStats}\n`;
+                }
+                msg += `\n`;
+
                 editions.forEach(e => {
                     msg += `📖 ${e.title}\n${formatEdition(e)}\n\n`;
                 });

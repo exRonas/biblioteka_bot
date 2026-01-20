@@ -8,9 +8,15 @@ function formatEdition(e: Edition): string {
     const parts = [];
     if (e.data_edition) parts.push(`📅 Издание: ${e.data_edition}`);
     if (e.language) parts.push(`🌐 Язык: ${e.language}`);
-    // if (e.placement) parts.push(`📍 Расположение: ${e.placement}`);
+    
+    // Updated Location Mapping from aggregations
+    if (e.locations && e.locations.length > 0) {
+        // e.locations is an array of department strings e.g. ["Абонемент", "ЧЗ"]
+        parts.push(`📍 Расположение: ${e.locations.join(', ')}`);
+    }
+
     if (e.index_catalogue) parts.push(`🔖 Шифр: ${e.index_catalogue}`);
-    if (e.volume) parts.push(`📚 Том: ${e.volume}`);
+    // if (e.volume) parts.push(`📚 Том: ${e.volume}`); // Removed by request
     if (e.copy_count) parts.push(`🔢 Экз: ${e.copy_count}`);
     
     // Fallback if no details
@@ -22,11 +28,13 @@ function formatEdition(e: Edition): string {
 // Define session structure
 interface SessionData {
   language: 'ru' | 'kz';
-  state: 'idle' | 'awaiting_search';
+  state: 'idle' | 'awaiting_search' | 'awaiting_search_title' | 'awaiting_search_author';
+  lastBotMessageId?: number; // To track the ID for editing
   lastSearch?: {
     query: string;
     offset: number;
     results_count: number;
+    mode: 'all' | 'title' | 'author';
   };
 }
 
@@ -42,145 +50,189 @@ bot.use(session({
 // Keyboards
 const getMainMenu = (lang: 'ru' | 'kz') => {
   const t = texts[lang].menu_items;
-  return new Keyboard()
-    .text(t.schedule).text(t.register).row()
-    .text(t.search).text(t.extend).row()
-    .text(t.address).text(t.contacts).row()
-    .text(t.socials).text(t.change_lang)
-    .resized();
+  // Use InlineKeyboard for single-window experience
+  return new InlineKeyboard()
+    .text(t.schedule, 'menu:schedule').text(t.register, 'menu:register').row()
+    .text(t.search, 'menu:search').text(t.extend, 'menu:extend').row()
+    .text(t.address, 'menu:address').text(t.contacts, 'menu:contacts').row()
+    .text(t.socials, 'menu:socials').text(t.change_lang, 'menu:change_lang');
 };
 
 const getLangKeyboard = () => {
-    return new Keyboard()
-        .text("Қазақ тілі").text("Русский язык")
-        .resized().oneTime();
+    // Inline keyboard for language selection
+    return new InlineKeyboard()
+        .text("Қазақ тілі", "lang:kz").text("Русский язык", "lang:ru");
 };
+
+// Helper to safely reply or edit
+async function safeReplyOrEdit(ctx: MyContext, text: string, extra: any = {}) {
+    try {
+        if (ctx.callbackQuery && ctx.callbackQuery.message) {
+             // We are reacting to a button click, so edit the message
+             await ctx.editMessageText(text, { ...extra, parse_mode: 'Markdown' });
+             ctx.session.lastBotMessageId = ctx.callbackQuery.message.message_id;
+        } else if (ctx.session.lastBotMessageId) {
+             // We have a stored message ID, try to edit it
+             try {
+                 await ctx.api.editMessageText(ctx.chat!.id, ctx.session.lastBotMessageId, text, { ...extra, parse_mode: 'Markdown' });
+             } catch (e) {
+                 // Editing failed (maybe message too old or deleted), send new one
+                 const msg = await ctx.reply(text, { ...extra, parse_mode: 'Markdown' });
+                 ctx.session.lastBotMessageId = msg.message_id;
+             }
+        } else {
+             // Fallback: send new message
+             const msg = await ctx.reply(text, { ...extra, parse_mode: 'Markdown' });
+             ctx.session.lastBotMessageId = msg.message_id;
+        }
+    } catch (e) {
+        console.error('SafeReply Error', e);
+        // Last resort
+        const msg = await ctx.reply(text, { ...extra, parse_mode: 'Markdown' });
+        ctx.session.lastBotMessageId = msg.message_id;
+    }
+}
 
 // --- Handlers ---
 
 // Start
 bot.command('start', async (ctx) => {
   ctx.session.state = 'idle';
-  await ctx.reply(texts.ru.welcome + "\n\n" + texts.ru.choose_lang, {
+  const msg = await ctx.reply(texts.ru.welcome + "\n\n" + texts.ru.choose_lang, {
     reply_markup: getLangKeyboard()
   });
+  ctx.session.lastBotMessageId = msg.message_id;
 });
 
-// Language Selection
-bot.hears(['Қазақ тілі', 'Русский язык'], async (ctx) => {
-    const isRu = ctx.message?.text === 'Русский язык';
+// Language Selection (via Callback)
+bot.callbackQuery(['lang:ru', 'lang:kz'], async (ctx) => {
+    const isRu = ctx.callbackQuery.data === 'lang:ru';
     ctx.session.language = isRu ? 'ru' : 'kz';
     ctx.session.state = 'idle';
     
-    await ctx.reply(isRu ? "Выбран Русский язык" : "Қазақ тілі таңдалды", {
+    await safeReplyOrEdit(ctx, isRu ? "Выбран Русский язык" : "Қазақ тілі таңдалды", {
         reply_markup: getMainMenu(ctx.session.language)
     });
+    await ctx.answerCallbackQuery();
 });
 
-// Change Language (from menu)
-bot.hears([texts.ru.menu_items.change_lang, texts.kz.menu_items.change_lang], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].choose_lang, {
-        reply_markup: getLangKeyboard()
-    });
-});
-
-// Schedule
-bot.hears([texts.ru.menu_items.schedule, texts.kz.menu_items.schedule], async (ctx) => {
+// Generic Menu Handler
+bot.callbackQuery(/^menu:/, async (ctx) => {
+    const action = ctx.callbackQuery.data.split(':')[1];
     const lang = ctx.session.language;
-    // Check if summer (example logic: June-August)
-    const month = new Date().getMonth(); // 0-11
-    const isSummer = month >= 5 && month <= 7;
-    
-    let text = texts[lang].schedule;
-    if (isSummer) {
-        text += "\n" + texts[lang].schedule_summer;
+    const t = texts[lang];
+
+    // Handle "Back to Menu" logic if we are deep in structure
+    // But since this is a menu click, we are at root.
+
+    switch (action) {
+        case 'change_lang':
+            await safeReplyOrEdit(ctx, texts[lang].choose_lang, {
+                reply_markup: getLangKeyboard()
+            });
+            break;
+        case 'schedule':
+            const month = new Date().getMonth(); 
+            const isSummer = month >= 5 && month <= 7;
+            let sched = t.schedule;
+            if (isSummer) sched += "\n" + t.schedule_summer;
+            // Add back button
+            await safeReplyOrEdit(ctx, sched, {
+                reply_markup: new InlineKeyboard().text(t.back, 'menu:main') // Add 'menu:main' handler below
+            });
+            break;
+        case 'register':
+            await safeReplyOrEdit(ctx, t.register, { reply_markup: new InlineKeyboard().text(t.back, 'menu:main') });
+            break;
+        case 'address':
+            await safeReplyOrEdit(ctx, t.address, { reply_markup: new InlineKeyboard().text(t.back, 'menu:main') });
+            break;
+        case 'contacts':
+            await safeReplyOrEdit(ctx, t.contacts, { reply_markup: new InlineKeyboard().text(t.back, 'menu:main') });
+            break;
+        case 'socials':
+            // Link preview options not supported in editMessageText usually, but let's try
+            // Actually visuals might be better if we send link? 
+            // Stick to edit.
+            await safeReplyOrEdit(ctx, t.socials, { reply_markup: new InlineKeyboard().text(t.back, 'menu:main') });
+            break;
+        case 'extend':
+            await safeReplyOrEdit(ctx, t.extend, { reply_markup: new InlineKeyboard().text(t.back, 'menu:main') });
+            break;
+        case 'search':
+             // Show search mode selection
+            const k = new InlineKeyboard()
+                .text(t.btn_search_title, 'mode:title')
+                .text(t.btn_search_author, 'mode:author')
+                .row().text(t.back, 'menu:main');
+            
+            await safeReplyOrEdit(ctx, t.search_mode_prompt, { reply_markup: k });
+            break;
+        case 'main':
+             ctx.session.state = 'idle';
+             await safeReplyOrEdit(ctx, t.choose_lang, { // Reusing welcome text or just menu text?
+                 reply_markup: getMainMenu(lang)
+             });
+             break;
     }
-    await ctx.reply(text, { parse_mode: 'Markdown' });
+    await ctx.answerCallbackQuery();
 });
 
-// Register
-bot.hears([texts.ru.menu_items.register, texts.kz.menu_items.register], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].register);
-});
-
-// Address
-bot.hears([texts.ru.menu_items.address, texts.kz.menu_items.address], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].address);
-});
-
-// Contacts
-bot.hears([texts.ru.menu_items.contacts, texts.kz.menu_items.contacts], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].contacts);
-});
-
-// Socials
-bot.hears([texts.ru.menu_items.socials, texts.kz.menu_items.socials], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].socials, { link_preview_options: { is_disabled: true } });
-});
-
-// Extend
-bot.hears([texts.ru.menu_items.extend, texts.kz.menu_items.extend], async (ctx) => {
-    await ctx.reply(texts[ctx.session.language].extend);
-});
-
-// Search Trigger
-bot.hears([texts.ru.menu_items.search, texts.kz.menu_items.search], async (ctx) => {
-    ctx.session.state = 'awaiting_search';
-    await ctx.reply(texts[ctx.session.language].search_prompt);
-});
 
 // Handle Search Query (Text messages when state is awaiting_search)
 bot.on('message:text', async (ctx) => {
-    if (ctx.session.state !== 'awaiting_search') return;
+    // Try to delete user message to keep chat clean
+    try {
+        await ctx.deleteMessage();
+    } catch (e) {
+        // Ignored, maybe no permission
+    }
+
+    // Check states
+    if (!['awaiting_search', 'awaiting_search_title', 'awaiting_search_author'].includes(ctx.session.state)) return;
     
-    // Ignore menu commands if somehow they leak here, but `hears` usually catches them first.
-    // However, grammy matching order matters. If `hears` is registered before, it runs.
-    // We should allow "Back" if we had a back button, but we use Main Menu.
-    // If user clicks a menu button, we want to exit search mode.
+    // Check strict commands
+    if (ctx.message.text === '/start') {
+        // Reset
+        return bot.handleUpdate(ctx.update); // Reprocess as command? No, just run start logic manually.
+        // Actually best to let it fall through or handle manually.
+        // If we deleted message, it's gone.
+    }
+
     const text = ctx.message.text;
     const t = texts[ctx.session.language];
     
-    // Check if it matches any main menu item to cancel search
-    const menuValues = Object.values(t.menu_items);
-    if (menuValues.includes(text)) {
-        // It's a menu command, let it bubble up or handle?
-        // Actually `bot.on` catches everything. We need to be careful.
-        // A better pattern is to use a filter or router.
-        // For simplicity: check if it looks like a menu item.
-        ctx.session.state = 'idle';
-        // Re-emit or just reply? Re-emitting is hard. 
-        // Let's just say "Search mode cancelled" and let them click again or handle it here.
-        // But since we have `bot.hears` above, and they are registered BEFORE this `bot.on`, 
-        // the `hears` middleware SHOULD catch it if `next()` is not called.
-        // So this handler only runs if no specific header matched.
-        // Perfect.
-    }
-
     if (text.length < 3) {
-        return ctx.reply(t.search_too_short);
+        // Show error for 3 sec then restore? Or just edit.
+        await safeReplyOrEdit(ctx, t.search_too_short);
+        return;
     }
 
-    await handleSearch(ctx, text, 0);
+    // Determine mode based on state
+    let mode: 'all' | 'title' | 'author' = 'all';
+    if (ctx.session.state === 'awaiting_search_title') mode = 'title';
+    if (ctx.session.state === 'awaiting_search_author') mode = 'author';
+
+    await handleSearch(ctx, text, 0, mode);
 });
 
-async function handleSearch(ctx: MyContext, query: string, offset: number) {
+async function handleSearch(ctx: MyContext, query: string, offset: number, mode: 'all' | 'title' | 'author' = 'all') {
     const lang = ctx.session.language;
     const t = texts[lang];
     
     try {
-        const { works, total } = await searchService.searchWorks(query, offset);
+        const { works } = await searchService.searchWorks(query, offset, 10, mode);
         
-        ctx.session.lastSearch = { query, offset, results_count: works.length };
+        ctx.session.lastSearch = { query, offset, results_count: works.length, mode };
 
         if (works.length === 0) {
-            if (ctx.callbackQuery) {
-                return ctx.answerCallbackQuery(t.search_no_results);
-            }
-            return ctx.reply(t.search_no_results);
+             const kb = new InlineKeyboard().text(t.back, 'menu:search');
+             await safeReplyOrEdit(ctx, t.search_no_results, { reply_markup: kb });
+             return;
         }
 
         // Construct message
-        let msg = `🔎 *${query}*\n\n`;
+        let msg = `🔎 *${query}* (${mode === 'title' ? t.btn_search_title : mode === 'author' ? t.btn_search_author : 'All'})\n\n`;
         works.forEach((w, i) => {
             msg += `${offset + i + 1}. *${w.display_title}*\n👤 ${w.display_author}\n📚 Издания: ${w.editions_count}\n\n`;
         });
@@ -195,70 +247,74 @@ async function handleSearch(ctx: MyContext, query: string, offset: number) {
         // Navigation buttons
         const navRow = new InlineKeyboard();
         if (offset > 0) {
-             navRow.text(`⬅️ ${t.back}`, `search_page:${query}:${Math.max(0, offset - 10)}`);
+             navRow.text(`⬅️ ${t.back}`, `search_page:${mode}:${query}:${Math.max(0, offset - 10)}`);
         }
-        // Assuming limit 10. If we got 10 items, likely there is a next page.
-        // Ideally we check total, but this is a simple heuristic.
+        // Assuming limit 10
         if (works.length === 10) { 
-             navRow.text(`${t.next} ➡️`, `search_page:${query}:${offset + 10}`);
+             navRow.text(`${t.next} ➡️`, `search_page:${mode}:${query}:${offset + 10}`);
         }
 
         row.row(); 
         row.append(navRow); 
+        // Add "Menu" button to exit search
+        row.row().text(t.back, 'menu:search');
 
-        if (ctx.callbackQuery && ctx.callbackQuery.message) {
-            // Edit existing message
-            // We must use editMessageText
-             await ctx.editMessageText(msg, { 
-                parse_mode: 'Markdown',
-                reply_markup: row 
-            });
-        } else {
-            // Send new message
-            await ctx.reply(msg, { 
-                parse_mode: 'Markdown',
-                reply_markup: row 
-            });
-        }
+        await safeReplyOrEdit(ctx, msg, { reply_markup: row });
 
     } catch (e) {
         console.error(e);
-        if (ctx.callbackQuery) await ctx.answerCallbackQuery("Error");
-        else await ctx.reply("Error processing search.");
+        await safeReplyOrEdit(ctx, "Error processing search.");
     }
 }
 
-// Callback Query Handler
+// Callback Query Handler: Data
 bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
     const lang = ctx.session.language;
     const t = texts[lang];
 
-    if (data.startsWith('search_page:')) {
+    // Skip menu handlers handled above
+    if (data.startsWith('lang:') || data.startsWith('menu:')) return; 
+
+    if (data.startsWith('mode:')) {
+        const mode = data.split(':')[1];
+        // Add Back button to prompt
+        const kb = new InlineKeyboard().text(t.back, 'menu:search');
+
+        if (mode === 'title') {
+            ctx.session.state = 'awaiting_search_title';
+            await safeReplyOrEdit(ctx, t.prompt_enter_title, { reply_markup: kb });
+        } else if (mode === 'author') {
+            ctx.session.state = 'awaiting_search_author';
+            await safeReplyOrEdit(ctx, t.prompt_enter_author, { reply_markup: kb });
+        }
+    }
+    else if (data.startsWith('search_page:')) {
         const parts = data.split(':');
-        // Handle potential colons in query? Query is 2nd part.
-        // search_page:query:offset
-        // But what if query has ':'?
-        // Better to use state or safe split.
-        // Let's assume query is everything between index 1 and last index.
+        const mode = parts[1] as 'all' | 'title' | 'author';
         const offset = parseInt(parts[parts.length - 1]);
-        const query = parts.slice(1, parts.length - 1).join(':');
+        const query = parts.slice(2, parts.length - 1).join(':');
         
-        await handleSearch(ctx, query, offset);
+        await handleSearch(ctx, query, offset, mode);
         await ctx.answerCallbackQuery();
     } 
     else if (data.startsWith('view_work:')) {
         const parts = data.split(':');
         const workKey = parts[1];
-        // Parse explicitly
         const offset = parts.length > 2 ? parseInt(parts[2]) : 0;
-
-        // Use safe defaults if parse failed
         const safeOffset = isNaN(offset) ? 0 : offset;
 
+        // Fetch aggregated location stats for the header
+        const locationStats = await searchService.getWorkLocationStats(workKey);
         const { items: editions, total } = await searchService.getEditions(workKey, safeOffset);
         
-        let msg = `${t.show_editions} (Total: ${total}):\n\n`;
+        // Header with aggregated locations
+        let msg = `${t.show_editions} (${t.total_count}: ${total}):\n`;
+        if (locationStats) {
+            msg += `🏢 Места хранения: ${locationStats}\n`;
+        }
+        msg += `\n`;
+
         editions.forEach(e => {
             msg += `📖 *${e.title}*\n${formatEdition(e)}\n\n`;
         });
@@ -268,53 +324,30 @@ bot.on('callback_query:data', async (ctx) => {
         // Pagination for editions
         const navRow = new InlineKeyboard();
         if (safeOffset > 0) {
-             // Prev
              navRow.text(`⬅️`, `view_work:${workKey}:${Math.max(0, safeOffset - 10)}`);
         }
         if (safeOffset + 10 < total) {
-             // Next
              navRow.text(`➡️`, `view_work:${workKey}:${safeOffset + 10}`);
         }
         kb.append(navRow);
         kb.row();
 
-        // Add "Back to List" button
-        // Recovery logic: if session is lost (restart), try to parse from message text
-        let recoveredQuery: string | undefined;
-        let recoveredOffset: number = 0;
-
+        // Recovery logic simplified: use session if possible, else we are stuck unless we parse.
+        // But since we are editing same message, session should persist in memory usually? 
+        // Actually session is per-user-chat.
+        // If restarting bot, memory session is lost.
+        // But we added parsing logic previously.
+        
         if (ctx.session.lastSearch) {
-             recoveredQuery = ctx.session.lastSearch.query;
-             recoveredOffset = ctx.session.lastSearch.offset;
-        } else if (ctx.callbackQuery && ctx.callbackQuery.message && 'text' in ctx.callbackQuery.message) {
-             // Attempt recovery from message text
-             // Format: "🔎 Query\n\n11. Title..."
-             const text = ctx.callbackQuery.message.text || '';
-             const lines = text.split('\n');
-             if (lines.length > 0 && lines[0].startsWith('🔎 ')) {
-                 recoveredQuery = lines[0].substring(3).trim(); // Remove "🔎 "
-                 
-                 // Find first numbered line to guess offset
-                 for (const line of lines) {
-                     const match = line.match(/^(\d+)\./);
-                     if (match) {
-                         recoveredOffset = Math.max(0, parseInt(match[1]) - 1);
-                         break;
-                     }
-                 }
-                 // Store back to session for next interactions
-                 ctx.session.lastSearch = { query: recoveredQuery, offset: recoveredOffset, results_count: 0 };
-             }
-        }
-
-        if (recoveredQuery) {
-             kb.text(`⬅️ ${t.back}`, `search_page:${recoveredQuery}:${recoveredOffset}`);
+             const { query, offset: searchOffset, mode } = ctx.session.lastSearch;
+             kb.text(`⬅️ ${t.back}`, `search_page:${mode}:${query}:${searchOffset}`);
         }
 
         await ctx.editMessageText(msg, { 
             parse_mode: 'Markdown',
             reply_markup: kb 
         });
+        ctx.session.lastBotMessageId = ctx.callbackQuery.message?.message_id;
         await ctx.answerCallbackQuery();
     }
 });

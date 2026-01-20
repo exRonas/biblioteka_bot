@@ -9,8 +9,8 @@ export function normalizeText(text: string | null | undefined): string {
   // 2. Replace 'ё' with 'е'
   normalized = normalized.replace(/ё/g, 'е');
   
-  // 3. Remove punctuation and special characters
-  normalized = normalized.replace(/[^\w\sа-яәіңғүұқөһ]/gi, ' '); // Keep Cyrillic + Kaz specific
+  // 3. Remove punctuation and special characters (including commas for search insensitivity)
+  normalized = normalized.replace(/[^\w\sа-яәіңғүұқөһ]/gi, ' '); // Keeps only letters and digits. Commas are replaced by space.
   
   // 4. Remove extra spaces
   normalized = normalized.replace(/\s+/g, ' ').trim();

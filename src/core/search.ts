@@ -23,7 +23,8 @@ export interface Edition {
   // Extended fields
   data_edition?: string | null;
   language?: string | null;
-  placement?: string | null;
+  // placement?: string | null; // Removed in favor of locations
+  locations?: string[]; // Array of department names
   index_catalogue?: string | null;
   volume?: string | null;
   copy_count?: string | null;
@@ -33,13 +34,28 @@ export const searchService = {
   /**
    * Search for distinct works (grouped editions)
    */
-  async searchWorks(query: string, offset = 0, limit = 10): Promise<{ works: Work[], total: number }> {
+  async searchWorks(query: string, offset = 0, limit = 10, mode: 'all' | 'title' | 'author' = 'all'): Promise<{ works: Work[], total: number }> {
     const normalizedQuery = normalizeText(query);
     if (normalizedQuery.length < 3) {
       return { works: [], total: 0 };
     }
 
-    const tsQuery = normalizedQuery.split(' ').filter(w => w).join(' & ') + ':*'; // Prefix search
+    let whereClause = '';
+    let params: any[] = [];
+    
+    if (mode === 'all') {
+        const tsQuery = normalizedQuery.split(' ').filter(w => w).join(' & ') + ':*';
+        whereClause = `search_tsv @@ to_tsquery('russian', $1) AND b_level_id != 5`;
+        params = [tsQuery, limit, offset];
+    } else if (mode === 'title') {
+        // Use ILIKE for specific field search
+        // We use normalizedQuery to ignore punctuation as requested
+        whereClause = `${config.columns.title} ILIKE $1 AND b_level_id != 5`;
+        params = [`%${normalizedQuery}%`, limit, offset];
+    } else if (mode === 'author') {
+        whereClause = `${config.columns.author} ILIKE $1 AND b_level_id != 5`;
+        params = [`%${normalizedQuery}%`, limit, offset];
+    }
 
     // Safer optimized query without full grouping total:
      const sqlWithCount = `
@@ -47,10 +63,10 @@ export const searchService = {
         SELECT 
           work_key,
           ${config.columns.title} as title,
-          ${config.columns.author} as author,
-          ts_rank(search_tsv, to_tsquery('russian', $1)) as rank
+          ${config.columns.author} as author
+          ${mode === 'all' ? `, ts_rank(search_tsv, to_tsquery('russian', $1)) as rank` : ', 1 as rank'}
         FROM ebook
-        WHERE search_tsv @@ to_tsquery('russian', $1)
+        WHERE ${whereClause}
       )
       SELECT 
         work_key,
@@ -65,11 +81,37 @@ export const searchService = {
     `;
 
     try {
-      const res = await db.query(sqlWithCount, [tsQuery, limit, offset]);
+      const res = await db.query(sqlWithCount, params);
       return { works: res.rows, total: 100 }; 
     } catch (e) {
       console.error('Search error:', e);
       return { works: [], total: 0 };
+    }
+  },
+
+  /**
+   * Get aggregated location statistics for a work
+   */
+  async getWorkLocationStats(workKey: string): Promise<string> {
+    const sql = `
+      SELECT
+        v.lib_depart_name
+      FROM ebook e
+      JOIN view_ebook_inv v ON v.ebook_id = e.id
+      WHERE e.work_key = $1
+      GROUP BY v.lib_depart_name
+      ORDER BY v.lib_depart_name
+    `;
+    
+    try {
+      const res = await db.query(sql, [workKey]);
+      if (res.rows.length === 0) return '';
+      
+      const parts = res.rows.map(row => row.lib_depart_name);
+      return parts.join(', ');
+    } catch (e) {
+      console.error('Get location stats error:', e);
+      return '';
     }
   },
 
@@ -79,11 +121,19 @@ export const searchService = {
   async getEditions(workKey: string, offset = 0, limit = 10): Promise<{ items: Edition[], total: number }> {
     // Basic ordering by ID usually implies recency in insertion.
     // If there is an ID column, use it. ID is standard.
+    // We get unique department names per edition, without counts.
     const sql = `
-      SELECT *, count(*) OVER() as full_count
-      FROM ebook
-      WHERE work_key = $1
-      ORDER BY id DESC
+      SELECT 
+        e.*, 
+        count(*) OVER() as full_count,
+        (
+          SELECT array_agg(DISTINCT v.lib_depart_name)
+          FROM view_ebook_inv v
+          WHERE v.ebook_id = e.id
+        ) as location_details
+      FROM ebook e
+      WHERE e.work_key = $1
+      ORDER BY e.id DESC
       LIMIT $2 OFFSET $3
     `;
     
@@ -101,7 +151,8 @@ export const searchService = {
             
             data_edition: row[config.columns.data_edition] || null,
             language: langStr,
-            placement: row[config.columns.placement] || null,
+            // placement: row[config.columns.placement] || null, // Removed
+            locations: row.location_details || [],
             index_catalogue: row[config.columns.index_catalogue] || null,
             volume: row[config.columns.volume] || null,
             copy_count: row[config.columns.copy_count] || null
